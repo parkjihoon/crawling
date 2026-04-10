@@ -1,157 +1,160 @@
 # 06. 운영 가이드
 
-## 일상 운영
+## 웹 대시보드 (권장)
 
-### 기본 수집 실행
+### 서버 실행
 
 ```bash
-# 매일 실행: 최신 공고 10페이지 수집
+# Windows
+start_server.cmd
+
+# 직접 실행
+venv\Scripts\python.exe server.py
+venv\Scripts\python.exe server.py --port 8080
+
+# Linux/Mac
+python server.py
+```
+
+브라우저에서 `http://localhost:5000` 접속.
+
+### 대시보드 기능
+
+| 메뉴 | 기능 |
+|------|------|
+| Dashboard | 실시간 통계, 진행 상황, 최근 로그 |
+| Crawl | 크롤링 실행/중지, 파라미터 설정 |
+| Results | 수집 결과 테이블 (검색/필터/정렬) |
+| Logs | 실시간 로그 스트리밍 (SSE) |
+| Files | 저장된 데이터 파일 관리/로드 |
+
+### 대시보드 API 엔드포인트
+
+```
+GET  /                  - 대시보드 UI
+GET  /api/status        - 크롤링 상태
+POST /api/crawl/start   - 크롤링 시작 (JSON body)
+POST /api/crawl/stop    - 크롤링 중지
+GET  /api/results       - 수집 결과 (검색: ?q=keyword, 필터: ?filter=suspicious)
+POST /api/results/load  - 파일에서 결과 로드
+GET  /api/logs/stream   - SSE 로그 스트리밍
+GET  /api/files         - data/ 폴더 파일 목록
+POST /api/classify      - LLM 허위 공고 분류
+```
+
+### 크롤링 시작 요청 예시
+
+```json
+POST /api/crawl/start
+{
+    "site": "rocketpunch",
+    "start_page": 1,
+    "end_page": 5,
+    "delay": 5.0,
+    "keywords": "",
+    "fetch_details": true,
+    "headless": true,
+    "discover_api": false
+}
+```
+
+## CLI 실행
+
+### 기본 수집
+
+```bash
+# 최신 공고 10페이지 수집
 python main.py --site rocketpunch --pages 1-10 --delay 5 --output both
 
-# 결과 확인
-ls -la data/
-cat logs/crawl_$(date +%Y-%m-%d).log | tail -20
-```
-
-### 키워드 기반 수집
-
-```bash
-# 특정 키워드로 검색하여 수집
+# 키워드 검색
 python main.py --site rocketpunch --pages 1-5 --keywords "재택" --output json
-python main.py --site rocketpunch --pages 1-5 --keywords "고수익" --output json
-```
 
-### 상세 정보 포함 수집
-
-```bash
-# 목록 + 상세 페이지 (느리지만 더 많은 정보)
+# 상세 포함 (page_action으로 카드 클릭, URL 캡처)
 python main.py --site rocketpunch --pages 1-3 --detail --delay 8
+
+# API 탐색 (capture_xhr로 XHR 캡처)
+python main.py --site rocketpunch --pages 1 --discover-api
 ```
+
+## 동적 크롤링 옵션
+
+### page_action (상세 URL 캡처)
+
+`--detail` 옵션 사용 시:
+1. 목록 페이지 로드 (wait_selector로 카드 렌더링 대기)
+2. page_action 콜백으로 각 카드 클릭
+3. SPA 네비게이션으로 변경된 URL 캡처 (`page.url`)
+4. 뒤로가기 → 다음 카드 반복
+5. 캡처된 URL로 상세 페이지 별도 요청
+
+### capture_xhr (API 발견)
+
+`--discover-api` 옵션 사용 시:
+- 페이지 로드 중 발생하는 XHR/fetch 요청을 자동 캡처
+- regex 패턴 매칭 (기본: `/api/.*job`)
+- 캡처된 API URL + 응답 바디 로깅
+- 발견된 API로 직접 호출 전환 가능 (향후)
+
+### wait_selector (렌더링 대기)
+
+모든 목록 요청에 적용:
+- `div[data-index]` 셀렉터 대기 (가상 스크롤 카드)
+- `network_idle` 대기 (API 호출 완료)
+- 추가 2초 대기 (가상 스크롤 안정화)
 
 ## 스케줄링 (cron)
 
 ### Linux crontab
 
 ```bash
-# 매일 오전 6시에 실행
-crontab -e
 0 6 * * * cd /path/to/crawling && /path/to/venv/bin/python main.py --site rocketpunch --pages 1-10 --output both >> logs/cron.log 2>&1
 ```
 
-### 스크립트 방식
+### Windows Task Scheduler
 
-```bash
-#!/bin/bash
-# run_daily.sh
-cd "$(dirname "$0")"
-source venv/bin/activate
-
-DATE=$(date +%Y-%m-%d)
-echo "[$DATE] 크롤링 시작" >> logs/cron.log
-
-python main.py \
-    --site rocketpunch \
-    --pages 1-10 \
-    --delay 5 \
-    --output both \
-    >> logs/cron.log 2>&1
-
-echo "[$DATE] 크롤링 완료" >> logs/cron.log
-```
+1. 작업 스케줄러 → 기본 작업 만들기
+2. 프로그램: `C:\path\to\crawling\venv\Scripts\python.exe`
+3. 인수: `main.py --site rocketpunch --pages 1-10 --output both`
+4. 시작 위치: `C:\path\to\crawling`
 
 ## 로그 관리
 
 ### 로그 위치
-
-- `logs/crawl_YYYY-MM-DD.log`: 일별 크롤링 로그
-- 콘솔 출력과 파일 출력 동시 지원
-
-### 로그 레벨
-
-```bash
-# 기본 (INFO)
-python main.py --site rocketpunch --pages 1
-
-# 상세 (DEBUG) - 요청/파싱 세부 정보 포함
-python main.py --site rocketpunch --pages 1 --verbose
-```
-
-### 로그 형식
-
-```
-[2026-04-10 14:30:00] INFO     crawling - [rocketpunch] 크롤링 시작 (page 1~10)
-[2026-04-10 14:30:05] INFO     crawling - [rocketpunch] 목록 페이지 1 요청
-[2026-04-10 14:30:08] INFO     crawling - [rocketpunch] 페이지 1: 20건 발견
-[2026-04-10 14:30:13] WARNING  crawling - 요청 에러 - 백오프 적용 (연속 에러: 1회)
-```
+- `logs/crawl_YYYY-MM-DD.log`: 일별 로그 파일
+- 대시보드 `/api/logs/stream`: 실시간 SSE 스트리밍
+- 콘솔 출력 동시 지원
 
 ### 로그 정리
 
 ```bash
-# 30일 이상 된 로그 삭제
 find logs/ -name "crawl_*.log" -mtime +30 -delete
-```
-
-## 데이터 관리
-
-### 출력 파일
-
-| 형식 | 경로 | 용도 |
-|------|------|------|
-| JSON | `data/{site}_{timestamp}.json` | 프로그래밍, API 연동 |
-| CSV | `data/{site}_{timestamp}.csv` | 엑셀, 분석 도구 |
-
-### 데이터 정리
-
-```bash
-# 7일 이상 된 수집 데이터 삭제
 find data/ -name "*.json" -mtime +7 -delete
-find data/ -name "*.csv" -mtime +7 -delete
 ```
 
 ## 에러 대응
 
-### 연속 에러 발생 시
-
-rate_limiter가 자동으로 백오프를 적용한다:
-- 1회 에러: 10초 대기
-- 2회 연속: 20초 대기
-- 3회 연속: 40초 대기
-- 최대 60초까지
-
-성공하면 원래 간격(5초)으로 복귀.
+### 연속 에러 시
+rate_limiter 자동 백오프: 10s → 20s → 40s → 최대 60s (성공 시 5s 복귀)
 
 ### CloudFront 차단 시
-
-IP가 차단된 경우:
-1. 실행 환경의 IP 확인 (`curl ifconfig.me`)
-2. 클라우드 IP인지 확인
-3. 일반 ISP 환경으로 이동
-4. 1~2시간 대기 후 재시도
+1. IP 확인 (`curl ifconfig.me`)
+2. 클라우드 IP면 일반 ISP 환경으로 이동
+3. 1~2시간 대기 후 재시도
 
 ### 사이트 구조 변경 시
-
-로켓펀치가 HTML 구조를 변경하면:
-1. `--no-headless --verbose` 로 실행하여 실제 DOM 확인
-2. `src/crawlers/rocketpunch.py`의 CSS 셀렉터 업데이트
-3. Scrapling의 `adaptive=True` 기능 활용 검토
-4. `manual/04-development.md`의 셀렉터 테이블 업데이트
+1. `--no-headless --verbose`로 실행하여 DOM 확인
+2. HTML 저장: `debug_rocketpunch.cmd`
+3. 로컬 테스트: `test_parse_local.py debug_page.html`
+4. 셀렉터 업데이트 → `manual/04-development.md` 동시 수정
 
 ## 모니터링 체크리스트
 
-일별 확인:
-- [ ] 크롤링 로그에 에러가 없는지
+일별:
+- [ ] 대시보드에서 에러 수 확인
 - [ ] 수집 건수가 정상 범위인지
-- [ ] data/ 디렉토리에 파일이 생성되었는지
+- [ ] data/ 파일 생성 확인
 
-주별 확인:
+주별:
 - [ ] robots.txt 변경 여부
 - [ ] 사이트 구조 변경 여부
 - [ ] 디스크 용량
-
-## Phase 2 확장 시 운영 변경사항
-
-- 사이트별 개별 스케줄 설정
-- DB 저장으로 전환 (JSON/CSV → PostgreSQL 등)
-- 중복 공고 필터링
-- 알림 시스템 (수집 실패, 구조 변경 감지)
