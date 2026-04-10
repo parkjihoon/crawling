@@ -101,18 +101,18 @@ class NewSiteCrawler(BaseCrawler):
 
     def fetch_list(self, page: int):
         """목록 페이지 요청"""
-        from scrapling.fetchers import StealthyFetcher  # 또는 Fetcher
+        from scrapling.fetchers import StealthyFetcher
         url = f"https://target-site.com/jobs?page={page}"
         try:
             return StealthyFetcher.fetch(url, headless=True)
         except Exception as e:
-            self.logger.error(f"fetch_list 에러: {e}")
+            self.logger.error(f"fetch_list error: {e}")
             return None
 
     def parse_list(self, response) -> list[dict]:
         """목록에서 공고 정보 추출"""
         items = []
-        job_cards = response.css(".job-card")  # 사이트에 맞게 수정
+        job_cards = response.css(".job-card")
         for card in job_cards:
             items.append({
                 "posting_id": card.attrib.get("data-id", ""),
@@ -169,23 +169,67 @@ def test_parse_detail():
 
 ## 로켓펀치 크롤러 상세
 
-### 파싱 셀렉터 (업데이트 필요 시 여기 수정)
+### HTML 구조 (2026-04 기준)
 
-로켓펀치는 Next.js 기반이라 클래스명이 빌드마다 변경될 수 있다.
-현재 사용 중인 셀렉터 목록:
+로켓펀치는 Next.js SSR + panda-css 기반이다. 주요 구조:
 
-| 필드 | 우선 셀렉터 | 폴백 셀렉터 |
-|------|------------|------------|
-| 제목 | `h1` | `[class*='title'] h1` |
-| 회사명 | `[class*='company-name']` | `[class*='CompanyName']` |
-| 위치 | `[class*='location']` | `[class*='address']` |
-| 급여 | `[class*='salary']` | `[class*='compensation']` |
-| 경력 | `[class*='experience']` | `[class*='career']` |
+- **가상 스크롤**: `div.List#job-content` 안에 `div[data-index="N"]` 카드들
+- **CSS-in-JS**: 클래스명이 CSS 속성 그대로 (e.g., `textStyle_Body.BodyS`)
+- **SPA 네비게이션**: 카드에 `<a href>` 없음, React 클릭 핸들러 사용
+- **보호**: AWS WAF + CloudFront CDN (클라우드 IP 차단)
 
-셀렉터가 작동하지 않으면:
-1. `--no-headless` 옵션으로 브라우저를 열어 실제 DOM 확인
-2. 셀렉터 업데이트
-3. Scrapling의 `adaptive=True` 기능 활용 검토
+### 목록 파싱 셀렉터 (2026-04 검증됨)
+
+| 대상 | CSS 셀렉터 | 설명 |
+|------|-----------|------|
+| 카드 컨테이너 | `div[data-index]` | 가상 스크롤 아이템 (각 공고) |
+| 회사명 | `p[class*="BodyS"]` (첫 번째) | `textStyle_Body.BodyS` + `secondary` + `lc_1` |
+| 공고 제목 | `p[class*="BodyM_Bold"]` | `textStyle_Body.BodyM_Bold` + `primary` |
+| 카테고리 | `p[class*="BodyS"]` (두 번째) | 회사명과 동일 셀렉터, 순서로 구분 |
+| 회사 로고 | `img[alt="image"]` | Next.js image 컴포넌트 |
+| 매칭 체크 | `use[href="#check-thick-outline"]` | SVG 체크 아이콘 |
+| 매칭 X | `use[href="#x-circle-outline"]` | SVG X 아이콘 |
+| 매칭 헤더 | `p[class*="ta_center"]` | "직군", "숙련도", "규모", "근무 방식" |
+
+### 상세 URL 확보 방법
+
+리스트 페이지 HTML에는 개별 공고 URL이 포함되지 않는다 (React SPA).
+상세 URL을 확보하려면:
+
+1. **API 인터셉트**: 브라우저 네트워크 탭에서 카드 클릭 시 호출되는 API 확인
+2. **브라우저 자동화**: StealthyFetcher로 카드를 클릭하고 `window.location` 캡처
+3. **회사 페이지 경유**: `rocketpunch.com/companies/{slug}` 에서 공고 목록 확인
+
+현재 구현: 리스트에서 추출 가능한 데이터만 수집 (phase 1), URL은 향후 보완.
+
+### Regex 폴백
+
+Scrapling CSS 셀렉터가 실패할 때를 대비한 regex 폴백이 내장되어 있다:
+
+```python
+# textStyle_Body.BodyS + secondary + lc_1 → 회사명
+r'textStyle_Body\.BodyS[^"]*c_foregrounds\.neutral\.secondary[^"]*lc_1">(.*?)</p>'
+
+# textStyle_Body.BodyM_Bold + primary → 제목
+r'textStyle_Body\.BodyM_Bold[^"]*c_foregrounds\.neutral\.primary">(.*?)</p>'
+
+# 이미지 URL에서 company ID
+r'image\.rocketpunch\.com/company/(\d+)/'
+```
+
+### 로컬 테스트 (HTML 파일)
+
+실제 사이트에 반복 요청하지 않고 로컬 HTML로 테스트:
+
+```bash
+# 1. HTML 저장 (한 번만)
+debug_rocketpunch.cmd
+
+# 2. 파싱 테스트 (반복 실행 가능)
+venv\Scripts\python.exe test_parse_local.py debug_page.html
+
+# 출력: JSON 파싱 결과 + Scrapling 셀렉터 검증
+```
 
 ### 디버깅
 
@@ -201,6 +245,97 @@ resp = c.fetch_detail('https://www.rocketpunch.com/jobs/12345')
 print(resp.css('h1::text').getall())
 "
 ```
+
+## LLM 파이프라인
+
+### 개요
+
+크롤링 데이터를 LLM으로 정제/분류하는 파이프라인이 `src/utils/llm_refiner.py`에 구현되어 있다.
+
+### 모드
+
+| 모드 | 용도 | 사용 시점 |
+|------|------|----------|
+| CLASSIFY | 허위 공고 판별 | 수집 후 분류 단계 |
+| REFINE | 파싱 보완/수정 | 누락 필드가 많을 때 |
+| EXTRACT | HTML에서 직접 추출 | CSS 셀렉터 완전 실패 시 |
+
+### 사용법
+
+```python
+from src.utils.llm_refiner import LLMRefiner
+
+# OpenAI 사용
+refiner = LLMRefiner(provider="openai", model="gpt-4o-mini")
+
+# Anthropic 사용
+refiner = LLMRefiner(provider="anthropic", model="claude-sonnet-4-20250514")
+
+# 허위 공고 판별
+result = refiner.classify_posting({"title": "...", "company_name": "..."})
+print(result.is_suspicious, result.confidence, result.reasons)
+
+# 일괄 판별
+results = refiner.batch_classify(postings_list)
+
+# 데이터 보완
+refined = refiner.refine_posting(posting_dict, html_context="<div>...</div>")
+
+# HTML 직접 추출 (폴백)
+data = refiner.extract_from_html(html_chunk)
+```
+
+### 환경변수
+
+```
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+LLM_PROVIDER=openai          # 기본 프로바이더
+LLM_MODEL=gpt-4o-mini        # 기본 모델
+```
+
+### 허위 공고 판별 기준
+
+LLM이 체크하는 주요 지표:
+
+- 비현실적 급여 대비 모호한 업무 설명
+- 선금 또는 개인 금융 정보 요구
+- 회사 정보 불명확/조작 의심
+- "투자 파트너", "사업 인수" 등 채용과 무관한 내용
+- MLM/다단계 패턴
+- 해외 근무 조건 의심
+- 면접 전 여권/신분증 요구
+
+## 시각화 대시보드
+
+### 실행
+
+```bash
+# 기본 (data/ 폴더 최신 파일)
+python viewer.py
+
+# 특정 파일 지정
+python viewer.py --file data/rocketpunch_20260410.json
+
+# 포트 변경
+python viewer.py --port 8080
+
+# HTML 파일로 저장 (서버 없이)
+python viewer.py --save dashboard.html
+```
+
+또는 Windows에서:
+```
+view_results.cmd
+```
+
+### 기능
+
+- 수집 결과 테이블 (정렬/검색/필터)
+- 허위 공고 의심 하이라이트 (빨간색)
+- 통계 요약 카드 (총 건수, 정상, 의심, 회사 수)
+- 매칭 정보 시각화 (초록/빨강 도트)
+- 다크 테마 UI
 
 ## 코딩 컨벤션
 
