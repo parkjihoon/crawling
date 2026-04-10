@@ -21,6 +21,10 @@ API 엔드포인트:
     GET  /api/results       - 수집 결과
     GET  /api/logs          - 로그 스트림
     POST /api/classify      - LLM 분류 실행
+    POST /api/schedule/start - 증분 수집 실행 (1회)
+    GET  /api/schedule/history - 스케줄러 실행 이력
+    GET  /api/health        - 사이트 건강 상태
+    GET  /api/faults        - 장애 이력
 """
 
 import argparse
@@ -426,6 +430,108 @@ def api_files():
 
 
 # ────────────────────────────────────────────
+# 증분 수집 (스케줄러) API
+# ────────────────────────────────────────────
+
+schedule_state = {
+    "is_running": False,
+    "last_result": None,
+    "thread": None,
+}
+
+
+@app.route("/api/schedule/start", methods=["POST"])
+def api_schedule_start():
+    """증분 수집 1회 실행."""
+    if schedule_state["is_running"]:
+        return jsonify({"error": "Incremental crawl already running"}), 409
+
+    data = request.get_json(silent=True) or {}
+    site = data.get("site", "rocketpunch")
+    pages = data.get("pages", "1-10")
+    delay = float(data.get("delay", 5.0))
+    keywords = data.get("keywords", "")
+    headless = data.get("headless", True)
+
+    def schedule_worker():
+        schedule_state["is_running"] = True
+        logger.info(f"[schedule] Incremental crawl started: {site} pages={pages}")
+        try:
+            from src.scheduler import run_incremental
+            result = run_incremental(
+                site=site, pages=pages, delay=delay,
+                keywords=keywords, headless=headless,
+            )
+            schedule_state["last_result"] = result
+            logger.info(
+                f"[schedule] Done: {result.get('new_items', 0)} new, "
+                f"{result.get('duplicates', 0)} duplicates"
+            )
+        except Exception as e:
+            logger.error(f"[schedule] Error: {e}")
+            schedule_state["last_result"] = {"error": str(e)}
+        finally:
+            schedule_state["is_running"] = False
+
+    t = threading.Thread(target=schedule_worker, daemon=True)
+    schedule_state["thread"] = t
+    t.start()
+
+    return jsonify({"status": "started", "site": site, "pages": pages})
+
+
+@app.route("/api/schedule/status")
+def api_schedule_status():
+    """증분 수집 상태."""
+    return jsonify({
+        "is_running": schedule_state["is_running"],
+        "last_result": schedule_state["last_result"],
+    })
+
+
+@app.route("/api/schedule/history")
+def api_schedule_history():
+    """증분 수집 실행 이력."""
+    site = request.args.get("site", "rocketpunch")
+    limit = int(request.args.get("limit", 30))
+    try:
+        from src.scheduler import get_run_history
+        history = get_run_history(site, limit=limit)
+        return jsonify({"site": site, "runs": history})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ────────────────────────────────────────────
+# 장애 탐지 API
+# ────────────────────────────────────────────
+
+@app.route("/api/health")
+def api_health():
+    """사이트 건강 상태 요약."""
+    site = request.args.get("site", "rocketpunch")
+    try:
+        from src.utils.fault_detector import FaultDetector
+        summary = FaultDetector.get_health_summary(site)
+        return jsonify(summary)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/faults")
+def api_faults():
+    """장애 이력 조회."""
+    site = request.args.get("site", "rocketpunch")
+    limit = int(request.args.get("limit", 50))
+    try:
+        from src.utils.fault_detector import FaultDetector
+        faults = FaultDetector.load_fault_history(site, limit=limit)
+        return jsonify({"site": site, "faults": faults, "total": len(faults)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ────────────────────────────────────────────
 # 대시보드 HTML (인라인)
 # ────────────────────────────────────────────
 
@@ -567,6 +673,8 @@ tr.suspicious { background: rgba(248,113,113,0.05); }
       <div class="nav-item" data-page="crawl"><span class="icon">&#9654;</span> Crawl</div>
       <div class="nav-item" data-page="results"><span class="icon">&#9776;</span> Results <span class="badge" id="results-badge">0</span></div>
       <div class="nav-item" data-page="logs"><span class="icon">&#9999;</span> Logs</div>
+      <div class="nav-item" data-page="schedule"><span class="icon">&#128337;</span> Scheduler</div>
+      <div class="nav-item" data-page="health"><span class="icon">&#128154;</span> Health</div>
       <div class="nav-item" data-page="files"><span class="icon">&#128193;</span> Files</div>
     </div>
     <div class="sidebar-footer">
@@ -664,6 +772,80 @@ tr.suspicious { background: rgba(248,113,113,0.05); }
           </label>
         </div>
         <div class="log-container" id="l-container"></div>
+      </div>
+    </div>
+
+    <!-- Scheduler Page -->
+    <div class="page" id="page-schedule">
+      <div class="page-header"><h2>Incremental Scheduler</h2></div>
+      <div class="page-body">
+        <div class="cards" style="margin-bottom:20px">
+          <div class="card accent"><div class="label">Last Run</div><div class="value" style="font-size:16px" id="s-last-time">-</div></div>
+          <div class="card success"><div class="label">New Items</div><div class="value" id="s-new">-</div></div>
+          <div class="card"><div class="label">Duplicates</div><div class="value" id="s-dupes">-</div></div>
+          <div class="card warning"><div class="label">Errors</div><div class="value" id="s-errors">-</div></div>
+        </div>
+
+        <div class="card" style="margin-bottom:20px">
+          <div class="label" style="margin-bottom:12px">Run Incremental Collection</div>
+          <div class="form-grid">
+            <div class="form-group"><label>Site</label><select id="s-site"><option value="rocketpunch">Rocketpunch</option></select></div>
+            <div class="form-group"><label>Pages</label><input type="text" id="s-pages" value="1-10" placeholder="1-10"></div>
+            <div class="form-group"><label>Delay (sec)</label><input type="number" id="s-delay" value="5" min="1" step="0.5"></div>
+            <div class="form-group"><label>Keywords</label><input type="text" id="s-keywords" placeholder="optional"></div>
+          </div>
+          <div class="btn-group" style="margin-top:8px">
+            <button class="btn btn-primary" id="btn-schedule-run" onclick="runIncremental()">&#9654; Run Now</button>
+            <span style="font-size:12px;color:var(--text-muted);display:flex;align-items:center" id="s-run-status"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="label" style="margin-bottom:12px">Run History</div>
+          <div style="overflow-x:auto">
+            <table>
+              <thead><tr>
+                <th>Timestamp</th><th>Total</th><th>New</th><th>Dupes</th><th>Errors</th><th>Health</th><th>File</th>
+              </tr></thead>
+              <tbody id="s-history-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Health Page -->
+    <div class="page" id="page-health">
+      <div class="page-header"><h2>System Health</h2></div>
+      <div class="page-body">
+        <div class="cards" style="margin-bottom:20px">
+          <div class="card" id="h-score-card"><div class="label">Health Score</div><div class="value" id="h-score">-</div><div class="sub" id="h-status">-</div></div>
+          <div class="card danger"><div class="label">Recent Faults</div><div class="value" id="h-fault-count">0</div></div>
+          <div class="card warning"><div class="label">Criticals</div><div class="value" id="h-critical-count">0</div></div>
+          <div class="card"><div class="label">Last Fault</div><div class="value" style="font-size:14px" id="h-last-fault">None</div></div>
+        </div>
+
+        <div class="card" style="margin-bottom:20px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <div class="label">Health Score Meter</div>
+            <button class="btn btn-secondary" onclick="refreshHealth()">Refresh</button>
+          </div>
+          <div style="background:var(--bg-primary);border-radius:8px;height:32px;overflow:hidden;position:relative">
+            <div id="h-meter" style="height:100%;border-radius:8px;transition:width 0.5s;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:white;min-width:40px" ></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="label" style="margin-bottom:12px">Fault History</div>
+          <div style="overflow-x:auto">
+            <table>
+              <thead><tr>
+                <th>Time</th><th>Type</th><th>Severity</th><th>Message</th><th>Recovered</th>
+              </tr></thead>
+              <tbody id="h-fault-tbody"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -847,8 +1029,153 @@ async function loadFile(path) {
   await fetch('/api/results/load', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({file: path}) });
 }
 
+// ─── Scheduler ───
+async function runIncremental() {
+  const btn = document.getElementById('btn-schedule-run');
+  const statusEl = document.getElementById('s-run-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Running...';
+
+  const body = {
+    site: document.getElementById('s-site').value,
+    pages: document.getElementById('s-pages').value,
+    delay: parseFloat(document.getElementById('s-delay').value),
+    keywords: document.getElementById('s-keywords').value,
+    headless: true,
+  };
+
+  try {
+    const res = await fetch('/api/schedule/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+    if (!res.ok) { const d = await res.json(); statusEl.textContent = d.error || 'Error'; btn.disabled = false; return; }
+    // Poll for completion
+    pollScheduleStatus();
+  } catch (e) { statusEl.textContent = 'Error: ' + e.message; btn.disabled = false; }
+}
+
+async function pollScheduleStatus() {
+  const btn = document.getElementById('btn-schedule-run');
+  const statusEl = document.getElementById('s-run-status');
+  const check = async () => {
+    try {
+      const res = await fetch('/api/schedule/status');
+      const data = await res.json();
+      if (data.is_running) {
+        statusEl.textContent = 'Running...';
+        setTimeout(check, 2000);
+      } else {
+        btn.disabled = false;
+        if (data.last_result) {
+          const r = data.last_result;
+          if (r.error) { statusEl.textContent = 'Error: ' + r.error; }
+          else {
+            statusEl.textContent = `Done: ${r.new_items} new, ${r.duplicates} dupes`;
+            document.getElementById('s-new').textContent = r.new_items;
+            document.getElementById('s-dupes').textContent = r.duplicates;
+            document.getElementById('s-errors').textContent = r.errors;
+            document.getElementById('s-last-time').textContent = r.timestamp ? r.timestamp.slice(0, 19) : '-';
+          }
+        }
+        refreshScheduleHistory();
+      }
+    } catch (e) { btn.disabled = false; statusEl.textContent = 'Poll error'; }
+  };
+  setTimeout(check, 2000);
+}
+
+async function refreshScheduleHistory() {
+  const site = document.getElementById('s-site').value;
+  try {
+    const res = await fetch(`/api/schedule/history?site=${site}&limit=30`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('s-history-tbody');
+    if (!data.runs || !data.runs.length) { tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text-muted)">No history yet</td></tr>'; return; }
+
+    tbody.innerHTML = data.runs.reverse().map(r => {
+      const ts = (r.timestamp || '').slice(0, 19);
+      const h = r.health || {};
+      const healthBadge = h.criticals > 0
+        ? `<span class="badge badge-scam">${h.criticals}C ${h.warnings || 0}W</span>`
+        : h.warnings > 0
+          ? `<span class="badge badge-suspicious">${h.warnings}W</span>`
+          : '<span class="badge badge-normal">OK</span>';
+      const file = r.output_file ? r.output_file.split('/').pop() : '-';
+      return `<tr><td style="font-size:12px">${ts}</td><td>${r.total_found || 0}</td><td style="color:var(--success)">${r.new_items || 0}</td><td>${r.duplicates || 0}</td><td style="color:${r.errors > 0 ? 'var(--danger)' : 'inherit'}">${r.errors || 0}</td><td>${healthBadge}</td><td style="font-size:11px;color:var(--text-muted)">${file}</td></tr>`;
+    }).join('');
+
+    // Update last-run cards from history
+    if (data.runs.length > 0) {
+      const last = data.runs[0];
+      document.getElementById('s-last-time').textContent = (last.timestamp || '-').slice(0, 19);
+      document.getElementById('s-new').textContent = last.new_items ?? '-';
+      document.getElementById('s-dupes').textContent = last.duplicates ?? '-';
+      document.getElementById('s-errors').textContent = last.errors ?? '-';
+    }
+  } catch (e) {}
+}
+
+// ─── Health ───
+async function refreshHealth() {
+  const site = 'rocketpunch';
+  try {
+    // Health summary
+    const hRes = await fetch(`/api/health?site=${site}`);
+    if (hRes.ok) {
+      const h = await hRes.json();
+      const score = h.health_score ?? 0;
+      document.getElementById('h-score').textContent = score;
+      document.getElementById('h-status').textContent = h.status || '-';
+
+      // Color the score card
+      const scoreCard = document.getElementById('h-score-card');
+      scoreCard.className = 'card ' + (score >= 80 ? 'success' : score >= 50 ? 'warning' : 'danger');
+
+      // Meter bar
+      const meter = document.getElementById('h-meter');
+      meter.style.width = score + '%';
+      meter.style.background = score >= 80 ? 'var(--success)' : score >= 50 ? 'var(--warning)' : 'var(--danger)';
+      meter.textContent = score + '%';
+
+      document.getElementById('h-fault-count').textContent = h.recent_faults ?? 0;
+    }
+
+    // Fault history
+    const fRes = await fetch(`/api/faults?site=${site}&limit=50`);
+    if (fRes.ok) {
+      const f = await fRes.json();
+      const faults = f.faults || [];
+      const criticals = faults.filter(x => x.severity === 'critical').length;
+      document.getElementById('h-critical-count').textContent = criticals;
+
+      if (faults.length > 0) {
+        const last = faults[faults.length - 1];
+        document.getElementById('h-last-fault').textContent = last.fault_type + ' (' + last.severity + ')';
+      } else {
+        document.getElementById('h-last-fault').textContent = 'None';
+      }
+
+      const tbody = document.getElementById('h-fault-tbody');
+      if (!faults.length) { tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted)">No faults recorded</td></tr>'; return; }
+
+      tbody.innerHTML = faults.reverse().map(ev => {
+        const ts = (ev.timestamp || '').slice(0, 19);
+        const sevBadge = ev.severity === 'critical'
+          ? '<span class="badge badge-scam">CRITICAL</span>'
+          : ev.severity === 'warning'
+            ? '<span class="badge badge-suspicious">WARNING</span>'
+            : '<span class="badge badge-normal">INFO</span>';
+        const recovered = ev.auto_recovered ? '<span style="color:var(--success)">Yes</span>' : '<span style="color:var(--text-muted)">No</span>';
+        const msg = (ev.message || '').length > 80 ? ev.message.slice(0, 80) + '...' : (ev.message || '-');
+        return `<tr><td style="font-size:12px">${ts}</td><td><span style="font-size:12px;color:var(--accent)">${ev.fault_type}</span></td><td>${sevBadge}</td><td style="font-size:12px">${msg}</td><td>${recovered}</td></tr>`;
+      }).join('');
+    }
+  } catch (e) { console.error('Health refresh error:', e); }
+}
+
 // Init
 refreshFiles();
+refreshScheduleHistory();
+refreshHealth();
 </script>
 </body>
 </html>"""
