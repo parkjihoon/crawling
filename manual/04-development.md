@@ -337,6 +337,114 @@ view_results.cmd
 - 매칭 정보 시각화 (초록/빨강 도트)
 - 다크 테마 UI
 
+## 증분 수집 스케줄러
+
+### 개요
+
+`src/scheduler.py`에 구현된 증분 수집 시스템. 매일 자동으로 신규 공고만 수집한다.
+
+### 사용법
+
+```bash
+# 1회 증분 수집 (cronjob에서 호출)
+python -m src.scheduler --mode once --site rocketpunch --pages 1-10
+
+# APScheduler 데몬 모드 (상시 구동)
+python -m src.scheduler --mode daemon --cron "0 6 * * *"
+
+# 커스텀 설정
+python -m src.scheduler --mode once --site rocketpunch --pages 1-5 --delay 8 --keywords "재택"
+```
+
+### 중복 제거 메커니즘
+
+1. `_posting_hash(title, company)`: 제목 + 회사명을 소문자 정규화 후 SHA-256 해시 생성 (앞 16자)
+2. `load_seen_hashes(site)`: `data/.dedup/{site}_seen.jsonl`에서 기존 해시 로드
+3. `filter_new_items(items, seen)`: 해시 비교로 신규만 필터
+4. `save_seen_hashes(site, new_items)`: 신규 해시를 JSONL에 append
+
+JSONL 포맷 (한 줄 = 한 공고):
+```json
+{"hash": "a1b2c3d4e5f67890", "title": "백엔드 개발자", "company": "테크컴퍼니", "seen_at": "2026-04-10T06:00:00"}
+```
+
+### 조기 종료
+
+특정 페이지의 모든 공고가 이미 수집된 경우, 뒤 페이지는 스킵한다.
+(최신순 정렬 기준으로, 이전 페이지에서 신규가 없으면 이후에도 없을 가능성 높음)
+
+### 실행 이력
+
+`data/.dedup/{site}_history.jsonl`에 매 실행 결과 기록:
+```json
+{"total_found": 80, "new_items": 12, "duplicates": 68, "errors": 0, "output_file": "data/rocketpunch_incr_20260410_060000.json", "timestamp": "2026-04-10T06:00:05", "health": {"faults": 0, "criticals": 0, "warnings": 0}}
+```
+
+## 자동 장애 탐지 (FaultDetector)
+
+### 개요
+
+`src/utils/fault_detector.py`에 구현된 자동 장애 탐지 및 자가 복구 모듈.
+스케줄러(`run_incremental`)에 통합되어 매 수집 시 자동으로 장애를 검사한다.
+
+### 장애 유형
+
+| 유형 | 탐지 조건 | 자동 복구 |
+|------|----------|----------|
+| `selector_break` | HTML 있으나 파싱 0건, 3회 연속 시 critical | HTML 스냅샷 저장, regex fallback 권고 |
+| `network_block` | HTTP 403/503/429, CloudFront 헤더 확인 | 대기 후 재시도 (최대 30분) |
+| `empty_response` | HTML 500자 미만 | 지연 후 재시도 |
+| `consecutive_error` | 5회 연속 실패 | 크롤링 중단 권고 |
+| `data_anomaly` | 과거 평균 대비 30% 이하 또는 300% 이상 | 수동 확인 권고 |
+
+### 사용법
+
+```python
+from src.utils.fault_detector import FaultDetector
+
+detector = FaultDetector(site="rocketpunch")
+
+# 파싱 결과 검증
+check = detector.check_parse_result(items, html_content=html, page_num=1)
+if not check["ok"]:
+    recovery = detector.attempt_recovery(check["fault"])
+    print(recovery["action"])  # "use_regex_fallback"
+
+# HTTP 응답 검증
+check = detector.check_http_response(status_code=403, url="...")
+if check["wait_seconds"] > 0:
+    time.sleep(check["wait_seconds"])
+
+# 데이터 품질 검증
+check = detector.check_data_quality(new_count=5, historical_avg=80.0)
+
+# 건강 상태 요약
+health = FaultDetector.get_health_summary("rocketpunch")
+print(health)  # {"health_score": 85, "status": "healthy", ...}
+
+# 장애 이력 조회
+history = FaultDetector.load_fault_history("rocketpunch", limit=50)
+```
+
+### 장애 로그
+
+장애 이벤트는 `data/.faults/{site}_faults.jsonl`에 기록된다:
+```json
+{"fault_type": "selector_break", "severity": "warning", "message": "...", "site": "rocketpunch", "timestamp": "2026-04-10T06:01:23", "details": {"page_num": 1, "html_length": 45000, "snapshot": "data/.faults/snapshots/rocketpunch_p1_20260410_060123.html"}, "auto_recovered": true, "recovery_action": "HTML snapshot saved"}
+```
+
+### HTML 스냅샷
+
+셀렉터 파손 시 자동으로 HTML 스냅샷이 저장된다 (최대 10개):
+- 경로: `data/.faults/snapshots/{site}_p{page}_{timestamp}.html`
+- 활용: `python test_parse_local.py data/.faults/snapshots/{file}` 로 오프라인 디버깅
+
+### 건강 점수
+
+`get_health_summary(site)` → 최근 24시간 장애 이력 기반:
+- critical 1건 = -20점, warning 1건 = -5점
+- 80+ = healthy, 50~79 = degraded, 0~49 = unhealthy
+
 ## 코딩 컨벤션
 
 - 타입 힌트 사용

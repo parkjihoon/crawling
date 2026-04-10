@@ -5,6 +5,11 @@
 ```
 crawling/
 ├── main.py                    # CLI 엔트리포인트
+├── server.py                  # Flask 웹 대시보드 서버
+├── viewer.py                  # 수집 결과 시각화 (독립 HTML 생성)
+├── test_parse_local.py        # 로컬 HTML 파싱 테스트
+├── start_server.cmd           # Windows 서버 실행 스크립트
+├── view_results.cmd           # Windows 뷰어 실행 스크립트
 ├── requirements.txt           # Python 의존성
 ├── .gitignore
 ├── config/
@@ -16,16 +21,25 @@ crawling/
 │   │   └── rocketpunch.py     # 로켓펀치 크롤러 (Scrapling StealthyFetcher)
 │   ├── parsers/
 │   │   └── __init__.py        # (Phase 2) 별도 파서 분리 시 사용
+│   ├── scheduler.py           # 증분 수집 스케줄러 (APScheduler / cronjob)
 │   ├── utils/
 │   │   ├── __init__.py
 │   │   ├── robots.py          # robots.txt 정책 관리
 │   │   ├── rate_limiter.py    # 요청 속도 제한 + 백오프
+│   │   ├── fault_detector.py  # 자동 장애 탐지 + 자가 복구
+│   │   ├── llm_refiner.py     # LLM 파이프라인 (허위 공고 판별/정제)
 │   │   ├── session.py         # HTTP 세션 관리 (정적 사이트 폴백용)
 │   │   └── logger.py          # 로깅 유틸리티
 │   └── models/
 │       ├── __init__.py
 │       └── job_posting.py     # 채용공고 데이터 모델 + JSON/CSV 저장
 ├── data/                      # 수집 데이터 (git 제외)
+│   └── .dedup/                # 증분 수집 중복 제거 데이터
+│       ├── {site}_seen.jsonl  #   수집 해시 기록
+│       └── {site}_history.jsonl  # 실행 이력
+│   └── .faults/               # 장애 탐지 로그
+│       ├── {site}_faults.jsonl  # 장애 이벤트 기록
+│       └── snapshots/         #   장애 시 HTML 스냅샷
 ├── logs/                      # 로그 파일 (git 제외)
 ├── tests/                     # 테스트 코드
 └── manual/                    # 매뉴얼 문서
@@ -102,6 +116,40 @@ StealthyFetcher 기반. AWS WAF 챌린지 자동 처리.
 - 연속 에러 시 백오프: 간격 2배 증가, 최대 60초
 - 성공 시 원래 간격으로 복귀
 
+### src/scheduler.py - 증분 수집 스케줄러
+
+매일 자동 수집을 위한 스케줄러. 두 가지 모드 지원:
+
+- **APScheduler 데몬**: `start_daemon(cron_expr="0 6 * * *")` — 프로세스 상시 구동
+- **cronjob 1회 실행**: `run_incremental(site, pages)` — OS 스케줄러에서 호출
+
+핵심 기능:
+- `_posting_hash(title, company)`: SHA-256 해시로 중복 판별
+- `load_seen_hashes()` / `save_seen_hashes()`: JSONL 기반 영속 dedup 저장소
+- `filter_new_items()`: 기존 해시와 비교하여 신규만 추출
+- 조기 종료: 특정 페이지의 모든 공고가 중복이면 뒤 페이지 스킵
+- `get_run_history()`: 최근 실행 이력 조회
+
+### src/utils/fault_detector.py - 자동 장애 탐지
+
+크롤링 장애를 자동으로 탐지하고 가능한 범위에서 자가 복구를 시도한다.
+
+탐지 유형:
+- **셀렉터 파손** (`selector_break`): HTML은 받았으나 파싱 0건 → regex fallback 권고, HTML 스냅샷 저장
+- **네트워크 차단** (`network_block`): HTTP 403/503/429 연속 발생 → 대기 후 재시도
+- **빈 응답** (`empty_response`): HTML이 없거나 극히 짧음 → 지연 후 재시도
+- **연속 에러** (`consecutive_error`): N회 연속 실패 → 크롤링 중단 권고
+- **데이터 이상** (`data_anomaly`): 과거 평균 대비 30% 이하 또는 300% 이상 → 구조 변경 의심
+
+건강 점수: `get_health_summary(site)` → 0~100 점수, healthy/degraded/unhealthy 상태
+
+### src/utils/llm_refiner.py - LLM 파이프라인
+
+크롤링 데이터를 LLM으로 분류/정제:
+- `classify_posting()`: 허위 공고 판별 (is_suspicious, confidence, reasons)
+- `refine_posting()`: 누락 필드 보완
+- `extract_from_html()`: HTML에서 직접 구조화 데이터 추출
+
 ### src/models/job_posting.py - 데이터 모델
 
 JobPosting 필드:
@@ -113,6 +161,8 @@ JobPosting 필드:
 저장: `save_to_json()`, `save_to_csv()`
 
 ## 데이터 흐름
+
+### 수동 실행 (CLI)
 
 ```
 1. main.py 실행 (CLI 인자 파싱)
@@ -129,6 +179,27 @@ JobPosting 필드:
 6. rocketpunch.py → parse_detail() → JobPosting 생성
    ↓
 7. job_posting.py → data/ 에 JSON/CSV 저장
+```
+
+### 증분 수집 (스케줄러)
+
+```
+1. scheduler.py 실행 (APScheduler 데몬 또는 cronjob)
+   ↓
+2. load_seen_hashes() → data/.dedup/{site}_seen.jsonl 로드
+   ↓
+3. rocketpunch.py → 목록 수집 (fetch_list + parse_list)
+   ↓ (FaultDetector: HTTP 응답 / 파싱 결과 검증)
+   ↓ (조기 종료: 모든 공고 중복 시 스킵)
+4. filter_new_items() → 해시 비교하여 신규만 추출
+   ↓
+5. check_data_quality() → 과거 평균 대비 이상 여부
+   ↓
+6. save_seen_hashes() → 신규 해시 기록
+   ↓
+7. data/{site}_incr_{timestamp}.json 저장
+   ↓
+8. _log_run_history() → 실행 결과 기록
 ```
 
 ## 새 사이트 추가 체크리스트

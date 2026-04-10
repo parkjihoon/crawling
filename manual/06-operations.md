@@ -102,11 +102,47 @@ python main.py --site rocketpunch --pages 1 --discover-api
 - `network_idle` 대기 (API 호출 완료)
 - 추가 2초 대기 (가상 스크롤 안정화)
 
-## 스케줄링 (cron)
+## 증분 수집 스케줄링
+
+### APScheduler 데몬 모드 (권장)
+
+프로세스를 상시 구동하여 자동 수집:
+
+```bash
+# 기본 (매일 06:00)
+python -m src.scheduler --mode daemon
+
+# 커스텀 스케줄 (매일 09:00, 21:00)
+python -m src.scheduler --mode daemon --cron "0 9,21 * * *"
+
+# 특정 사이트, 페이지 범위
+python -m src.scheduler --mode daemon --site rocketpunch --pages 1-20 --delay 8
+```
+
+환경변수로도 설정 가능:
+```bash
+export CRAWL_SCHEDULE="0 6 * * *"
+export CRAWL_SITES="rocketpunch"
+export CRAWL_PAGES="1-10"
+export CRAWL_DELAY=5
+```
+
+### cronjob 1회 실행 모드
+
+OS 스케줄러에서 직접 호출:
+
+```bash
+# 1회 실행 후 종료
+python -m src.scheduler --mode once --site rocketpunch --pages 1-10
+```
 
 ### Linux crontab
 
 ```bash
+# 매일 06:00 증분 수집
+0 6 * * * cd /path/to/crawling && /path/to/venv/bin/python -m src.scheduler --mode once --site rocketpunch >> logs/cron.log 2>&1
+
+# 구버전 호환 (main.py 직접 호출)
 0 6 * * * cd /path/to/crawling && /path/to/venv/bin/python main.py --site rocketpunch --pages 1-10 --output both >> logs/cron.log 2>&1
 ```
 
@@ -114,8 +150,36 @@ python main.py --site rocketpunch --pages 1 --discover-api
 
 1. 작업 스케줄러 → 기본 작업 만들기
 2. 프로그램: `C:\path\to\crawling\venv\Scripts\python.exe`
-3. 인수: `main.py --site rocketpunch --pages 1-10 --output both`
+3. 인수: `-m src.scheduler --mode once --site rocketpunch`
 4. 시작 위치: `C:\path\to\crawling`
+
+## 장애 탐지 및 모니터링
+
+### 건강 상태 확인
+
+```python
+from src.utils.fault_detector import FaultDetector
+
+# 사이트 건강 상태
+health = FaultDetector.get_health_summary("rocketpunch")
+print(f"Score: {health['health_score']}, Status: {health['status']}")
+
+# 최근 장애 이력
+faults = FaultDetector.load_fault_history("rocketpunch", limit=20)
+```
+
+### 장애 자동 대응 흐름
+
+1. **셀렉터 파손**: HTML 스냅샷 자동 저장 → `test_parse_local.py`로 디버깅 → 셀렉터 수정
+2. **CloudFront 차단**: 자동 대기 (5분~30분) → IP 변경 필요 시 수동 전환
+3. **데이터 이상**: 실행 이력 비교 → `--no-headless --verbose`로 수동 확인
+4. **연속 에러**: 크롤링 자동 중단 → 로그 확인 후 원인 조치
+
+### 장애 로그 위치
+
+- `data/.faults/{site}_faults.jsonl`: 장애 이벤트 로그
+- `data/.faults/snapshots/`: 장애 시 HTML 스냅샷 (최대 10개)
+- `data/.dedup/{site}_history.jsonl`: 실행 이력 (수집 건수, 에러 수 포함)
 
 ## 로그 관리
 

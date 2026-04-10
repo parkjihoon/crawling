@@ -30,6 +30,10 @@
 | 크롤링 프레임워크 | [Scrapling](https://github.com/D4Vinci/Scrapling) |
 | 브라우저 엔진 | Patchright (StealthyFetcher), Playwright (DynamicFetcher) |
 | Anti-bot 우회 | Scrapling StealthyFetcher (AWS WAF, Cloudflare 대응) |
+| 스케줄링 | APScheduler (데몬 모드) / cronjob (1회 실행 모드) |
+| 장애 탐지 | 자동 장애 탐지 + 자가 복구 모듈 (FaultDetector) |
+| 웹 대시보드 | Flask (실시간 SSE 로그 스트리밍) |
+| LLM 파이프라인 | OpenAI / Anthropic (허위 공고 판별, 선택 사항) |
 | 데이터 저장 | JSON, CSV (Phase 2에서 DB 연동 예정) |
 
 ## 핵심 원칙
@@ -68,6 +72,36 @@
 - **클라우드 IP 차단**: AWS, GCP 등 클라우드 IP 대역에서 CloudFront 403 차단
 - **일반 IP 필수**: 로컬 PC, 사무실 서버 등 일반 ISP IP에서 실행해야 함
 - **브라우저 엔진 필수**: 단순 HTTP 요청으로는 WAF 챌린지 통과 불가
+
+## 운영 모드
+
+### 1. 증분 수집 (Incremental Collection)
+
+매일 자동으로 신규 공고만 수집하는 모드. 기존 수집 데이터와 해시 비교(SHA-256: 제목+회사명)하여 중복을 자동 제거한다.
+
+- **APScheduler 데몬**: 프로세스 상시 구동, cron 표현식으로 스케줄 설정
+- **cronjob 모드**: 1회 실행 후 종료, OS 스케줄러(crontab/Task Scheduler)에서 호출
+- 조기 종료: 특정 페이지의 모든 공고가 이미 수집된 경우 자동 중단
+- 실행 이력: `data/.dedup/{site}_history.jsonl`에 매 실행 결과 기록
+
+### 2. 자동 장애 탐지 및 자가 복구
+
+유지보수 부담을 줄이기 위한 자동 장애 대응 시스템:
+
+- **셀렉터 파손 탐지**: 파싱 0건 연속 발생 시 HTML 스냅샷 저장 + regex fallback 권고
+- **네트워크 차단 탐지**: HTTP 403/503 감지, CloudFront 차단 시 자동 대기
+- **데이터 품질 이상**: 과거 평균 대비 수집량 급감/급증 시 경고
+- **연속 에러 대응**: N회 연속 실패 시 크롤링 자동 중단 + 알림
+- 건강 상태 점수(0~100) 산출, 장애 이력 JSONL 기록
+
+### 3. 웹 대시보드
+
+Flask 기반 실시간 대시보드:
+
+- 크롤링 실행/중지, 파라미터 설정
+- 수집 결과 테이블 (검색/필터/정렬)
+- 실시간 로그 스트리밍 (SSE)
+- LLM 허위 공고 분류 트리거
 
 ## 다음 단계
 

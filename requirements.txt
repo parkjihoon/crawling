@@ -16,6 +16,9 @@ pyyaml>=6.0
 # 웹 대시보드
 flask>=3.0.0
 
+# 스케줄링 (증분 수집 데몬 모드)
+apscheduler>=3.10.0
+
 # LLM 파이프라인 (선택)
 # openai>=1.0.0
 # anthropic>=0.30.0
