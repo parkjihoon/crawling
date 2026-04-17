@@ -238,13 +238,41 @@ venv\Scripts\python.exe test_parse_local.py debug_page.html
 python main.py --site rocketpunch --pages 1 --no-headless --verbose
 
 # 특정 상세 페이지 테스트
-python3 -c "
+python -c "
 from src.crawlers.rocketpunch import RocketPunchCrawler
 c = RocketPunchCrawler(headless=False)
 resp = c.fetch_detail('https://www.rocketpunch.com/jobs/12345')
 print(resp.css('h1::text').getall())
 "
 ```
+
+### 브라우저 채널 (`real_chrome`) 옵션
+
+`RocketPunchCrawler`는 `real_chrome` 인자로 Scrapling StealthyFetcher가 사용하는
+브라우저 채널을 선택한다.
+
+| 값 | Playwright channel | 바이너리 |
+|----|-------------------|--------|
+| `True` | `"chrome"` | 시스템에 설치된 Google Chrome |
+| `False` | `"chromium"` | patchright 번들 Chromium (`ms-playwright/chromium-1208`) |
+| `None` (기본) | 자동 결정 | 환경변수 → 시스템 Chrome 감지 → 기본값 |
+
+자동 결정 규칙 (`_resolve_real_chrome`):
+
+1. 생성자 인자에 `True`/`False`가 넘어오면 그대로 사용
+2. 환경변수 `CRAWLER_REAL_CHROME`이 `1/true/yes/on`이면 True, `0/false/no/off`면 False
+3. 기본 경로에 Chrome 실행 파일이 존재하면 True, 없으면 False
+
+CLI에서도 같은 옵션을 노출한다.
+
+```bash
+python main.py --site rocketpunch --pages 1 --real-chrome
+python main.py --site rocketpunch --pages 1 --no-real-chrome
+```
+
+Windows + patchright 번들 chromium 조합에서 `spawn UNKNOWN` 에러가 발생하는
+케이스가 보고되어 있으므로(05-setup.md 트러블슈팅 참조), 기본값은 Chrome이
+설치돼 있다면 사용하도록 되어 있다.
 
 ## LLM 파이프라인
 

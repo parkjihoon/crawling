@@ -15,6 +15,9 @@ python -m patchright install chromium
 ```bash
 # 로켓펀치 최신 공고 수집 (1~3페이지)
 python main.py --site rocketpunch --pages 1-3 --delay 5
+
+# Windows에서 'spawn UNKNOWN' 에러가 나면 시스템 Chrome 사용
+python main.py --site rocketpunch --pages 1-3 --real-chrome
 ```
 
 ## 지원 사이트
@@ -48,6 +51,7 @@ crawling/
 | [04-development.md](manual/04-development.md) | 개발 가이드, 새 크롤러 추가 방법 |
 | [05-setup.md](manual/05-setup.md) | 설치, 환경 설정, 트러블슈팅 |
 | [06-operations.md](manual/06-operations.md) | 운영, 스케줄링, 모니터링 |
+| [99-session-log.md](manual/99-session-log.md) | 세션 로그 (재개 진단 기록, 트러블슈팅 근거) |
 
 ## 주의사항
 

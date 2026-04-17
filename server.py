@@ -163,6 +163,7 @@ def api_crawl_start():
     fetch_details = data.get("fetch_details", False)
     headless = data.get("headless", True)
     discover_api = data.get("discover_api", False)
+    real_chrome = data.get("real_chrome")  # None/True/False, None은 자동 감지
 
     def crawl_worker():
         state.reset()
@@ -180,6 +181,7 @@ def api_crawl_start():
                     crawl_delay=delay,
                     keywords=keywords,
                     headless=headless,
+                    real_chrome=real_chrome,
                 )
 
                 all_postings = []
@@ -452,6 +454,7 @@ def api_schedule_start():
     delay = float(data.get("delay", 5.0))
     keywords = data.get("keywords", "")
     headless = data.get("headless", True)
+    real_chrome = data.get("real_chrome")
 
     def schedule_worker():
         schedule_state["is_running"] = True
@@ -461,6 +464,7 @@ def api_schedule_start():
             result = run_incremental(
                 site=site, pages=pages, delay=delay,
                 keywords=keywords, headless=headless,
+                real_chrome=real_chrome,
             )
             schedule_state["last_result"] = result
             logger.info(
@@ -721,6 +725,7 @@ tr.suspicious { background: rgba(248,113,113,0.05); }
           <div class="form-group"><label>Keywords</label><input type="text" id="c-keywords" placeholder="e.g. backend"></div>
           <div class="form-group"><label>Fetch Details</label><select id="c-details"><option value="false">No (list only)</option><option value="true">Yes (page_action click)</option></select></div>
           <div class="form-group"><label>Headless</label><select id="c-headless"><option value="true">Yes</option><option value="false">No (show browser)</option></select></div>
+          <div class="form-group"><label>Browser</label><select id="c-chrome"><option value="auto">Auto-detect</option><option value="true">System Chrome (real_chrome)</option><option value="false">Bundled Chromium</option></select></div>
           <div class="form-group"><label>Discover API</label><select id="c-api"><option value="false">No</option><option value="true">Yes (capture_xhr)</option></select></div>
         </div>
         <div class="btn-group">
@@ -958,6 +963,7 @@ setInterval(async () => {
 
 // ─── Crawl Controls ───
 async function startCrawl() {
+  const chromeSel = document.getElementById('c-chrome').value;
   const body = {
     site: document.getElementById('c-site').value,
     start_page: parseInt(document.getElementById('c-start').value),
@@ -967,6 +973,7 @@ async function startCrawl() {
     fetch_details: document.getElementById('c-details').value === 'true',
     headless: document.getElementById('c-headless').value === 'true',
     discover_api: document.getElementById('c-api').value === 'true',
+    real_chrome: chromeSel === 'auto' ? null : (chromeSel === 'true'),
   };
   await fetch('/api/crawl/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
 }

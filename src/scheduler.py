@@ -132,6 +132,7 @@ def run_incremental(
     keywords: str = "",
     fetch_details: bool = False,
     headless: bool = True,
+    real_chrome: Optional[bool] = None,
 ) -> dict:
     """
     증분 수집을 실행한다.
@@ -164,6 +165,7 @@ def run_incremental(
             crawl_delay=delay,
             keywords=keywords,
             headless=headless,
+            real_chrome=real_chrome,
         )
     else:
         logger.error(f"Unknown site: {site}")

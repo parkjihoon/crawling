@@ -110,6 +110,7 @@ class RocketPunchCrawler(BaseCrawler):
         keywords: str = "",
         order: str = "recent",
         headless: bool = True,
+        real_chrome: Optional[bool] = None,
     ):
         """
         Args:
@@ -117,6 +118,12 @@ class RocketPunchCrawler(BaseCrawler):
             keywords: 검색 키워드 (빈 문자열이면 전체 조회)
             order: 정렬 기준 - "recent"(최신순), "score"(적합순)
             headless: 브라우저 숨김 모드 (True 권장)
+            real_chrome: True이면 시스템에 설치된 Chrome을 사용(channel="chrome").
+                         False이면 patchright 번들 chromium(channel="chromium").
+                         None(기본)이면 환경변수 CRAWLER_REAL_CHROME 또는
+                         시스템 Chrome 설치 여부로 자동 결정한다.
+                         Windows + patchright 조합에서 번들 chromium이
+                         `spawn UNKNOWN`으로 실패하는 환경에서는 True 권장.
         """
         super().__init__(
             site_name="rocketpunch",
@@ -126,7 +133,33 @@ class RocketPunchCrawler(BaseCrawler):
         self.keywords = keywords
         self.order = order
         self.headless = headless
+        self.real_chrome = self._resolve_real_chrome(real_chrome)
         self._session = None
+
+    @staticmethod
+    def _resolve_real_chrome(value: Optional[bool]) -> bool:
+        """real_chrome 기본값을 결정한다.
+
+        우선순위: 명시 인자 > 환경변수 > 시스템 Chrome 자동 감지.
+        """
+        if value is not None:
+            return value
+
+        import os as _os
+        env = _os.environ.get("CRAWLER_REAL_CHROME", "").strip().lower()
+        if env in ("1", "true", "yes", "on"):
+            return True
+        if env in ("0", "false", "no", "off"):
+            return False
+
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+        ]
+        return any(_os.path.exists(p) for p in candidates)
 
     def _get_fetcher(self):
         """
@@ -170,6 +203,7 @@ class RocketPunchCrawler(BaseCrawler):
             response = fetcher.fetch(
                 url,
                 headless=self.headless,
+                real_chrome=self.real_chrome,
                 wait_selector=PW_JOB_CARD,          # 카드 렌더링 대기
                 wait_selector_state="attached",
                 network_idle=True,                    # 네트워크 안정 대기
@@ -286,6 +320,7 @@ class RocketPunchCrawler(BaseCrawler):
             response = fetcher.fetch(
                 url,
                 headless=self.headless,
+                real_chrome=self.real_chrome,
                 page_action=click_cards_and_capture,
                 wait_selector=PW_JOB_CARD,
                 wait_selector_state="attached",
@@ -324,6 +359,7 @@ class RocketPunchCrawler(BaseCrawler):
             response = fetcher.fetch(
                 url,
                 headless=self.headless,
+                real_chrome=self.real_chrome,
                 capture_xhr=xhr_pattern,
                 wait_selector=PW_JOB_CARD,
                 wait_selector_state="attached",
@@ -432,6 +468,7 @@ class RocketPunchCrawler(BaseCrawler):
             response = fetcher.fetch(
                 url,
                 headless=self.headless,
+                real_chrome=self.real_chrome,
                 page_action=scroll_to_bottom,
                 wait_selector=PW_JOB_CARD,
                 wait_selector_state="attached",
@@ -764,6 +801,7 @@ class RocketPunchCrawler(BaseCrawler):
             response = fetcher.fetch(
                 url,
                 headless=self.headless,
+                real_chrome=self.real_chrome,
                 wait_selector="h1",                    # 제목 렌더링 대기
                 wait_selector_state="visible",
                 network_idle=True,

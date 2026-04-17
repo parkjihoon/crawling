@@ -49,6 +49,7 @@ def get_crawler(site: str, **kwargs):
             keywords=kwargs.get("keywords", ""),
             order=kwargs.get("order", "recent"),
             headless=kwargs.get("headless", True),
+            real_chrome=kwargs.get("real_chrome", None),
         )
     else:
         raise ValueError(
@@ -109,6 +110,15 @@ def main():
         help="브라우저 창을 표시 (디버깅용)",
     )
     parser.add_argument(
+        "--real-chrome", dest="real_chrome", action="store_true", default=None,
+        help="시스템 Chrome 사용 (Windows+patchright에서 'spawn UNKNOWN' 회피). "
+             "미지정 시 환경변수 CRAWLER_REAL_CHROME 또는 Chrome 자동 감지.",
+    )
+    parser.add_argument(
+        "--no-real-chrome", dest="real_chrome", action="store_false",
+        help="patchright 번들 chromium 강제 사용 (자동 감지 무시)",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="상세 로그 출력",
     )
@@ -138,6 +148,7 @@ def main():
         keywords=args.keywords,
         order=args.order,
         headless=not args.no_headless,
+        real_chrome=args.real_chrome,
     )
 
     # 크롤링 실행
